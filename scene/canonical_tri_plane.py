@@ -46,12 +46,12 @@ class canonical_tri_plane(nn.Module):
         scale, rotation, opacity, sh = None,None,None,None
         B,_,_ = rays_pts_emb.shape
         feature = self.grid(rays_pts_emb[0,:,:3]).unsqueeze(dim=0).repeat(B,1,1) # get features from points
-        if only_feature:
+        if only_feature:    # goes here when doing spatial-audio attention
             if train_tri_plane == False:
                 feature = feature.detach()
             return feature
         
-        feature = self.feature_out(feature) # use MLPs to get feature, scale, rot, etc
+        feature = self.feature_out(feature) # use MLPs to get feature, scale, rot, etc, [Batch x Num points x 128]
         scale = self.scales(feature)
         rotation = self.rotations(feature)
         opacity = self.opacity(feature)

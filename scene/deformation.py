@@ -153,25 +153,26 @@ class Deformation(nn.Module):
             enc_x = self.enc_x[:B]
         
         else:
-            # audio_features [B, 8, 29, 16]) 
+            # audio_features [B, 8, 29, 16]). enc_x -> point cloud embeddings [B, N, 64] 
             enc_x = self.tri_plane(rays_pts_emb,only_feature = True, train_tri_plane = self.args.train_tri_plane)
             
         enc_a_list= []
-        for i in range(B):
-            enc_a = self.audio_net(audio_features[i])   # 8 32
+        for i in range(B):  # why not batching???
+            enc_a = self.audio_net(audio_features[i])   # [1, 8, 29, 16] -> [8, 32] (8: audio seqs, 32: emb dim)
             enc_a = self.audio_att_net(enc_a.unsqueeze(0))  # 1 32 
             enc_a_list.append(enc_a.unsqueeze(0))
         
         enc_a = torch.cat(enc_a_list,dim=0) # B, 1, 32
         enc_eye = self.eye_encoding(eye_features).unsqueeze(1) # B, 1, 32
-        enc_cam = self.cam_mlp(cam_features).unsqueeze(1)
+        enc_cam = self.cam_mlp(cam_features).unsqueeze(1) # B, 1, 64 -> v_n
         
         if self.args.d_model != 32:
-            enc_a = self.audio_mlp(enc_a) # B, 1, dim
-            enc_eye = self.eye_mlp(enc_eye) # B, 1, dim
+            enc_a = self.audio_mlp(enc_a) # B, 1, dim -> a_n   (dim = 64)
+            enc_eye = self.eye_mlp(enc_eye) # B, 1, dim -> e_n  (dim = 64)
         
         enc_source = torch.cat([enc_a,enc_eye, enc_cam, self.null_vector.repeat(B,1,1)],dim = 1) # B, 3, dim
-        x, attention = self.transformer(enc_x, enc_source)
+        # queries: x (point cloud features), k & v: enc_source (audio, eye, viewpoint features)
+        x, attention = self.transformer(enc_x, enc_source)  # enc_x ->(B, N, 64); enc_source -> (B, 4, 64)
         return x, attention
     
     def attention_query_audio(self, rays_pts_emb, scales_emb, rotations_emb, audio_features, eye_features):
@@ -395,9 +396,9 @@ class deform_network(nn.Module):
             return means3D, scales, rotations, opacity, shs, attention
 
         else:
-            point_emb = poc_fre(point,self.pos_poc)         # B, N, 3 -> B, N, 63
-            scales_emb = poc_fre(scales,self.rotation_scaling_poc)
-            rotations_emb = poc_fre(rotations,self.rotation_scaling_poc)
+            point_emb = poc_fre(point,self.pos_poc)      # B, N, 3 -> B, N, 63 (concat pos encoding for attention)
+            scales_emb = poc_fre(scales,self.rotation_scaling_poc)  # B, N, 3 -> B, N, 15
+            rotations_emb = poc_fre(rotations,self.rotation_scaling_poc) # B, N, 4 -> B, N, 20
             means3D, scales, rotations, opacity, shs, attention = self.deformation_net(point_emb,
                                                     scales_emb,
                                                     rotations_emb,

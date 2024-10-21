@@ -273,9 +273,9 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
     train_l_temp=opt.train_l
     opt.train_l=["xyz","deformation","grid","f_dc","f_rest","opacity","scaling","rotation"]
     print(opt.train_l)
-    scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
-                             checkpoint_iterations, checkpoint, debug_from,
-                             gaussians, scene, "coarse", tb_writer, opt.coarse_iterations,timer, use_wandb)
+    # scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
+    #                          checkpoint_iterations, checkpoint, debug_from,
+    #                          gaussians, scene, "coarse", tb_writer, opt.coarse_iterations,timer, use_wandb)
     
     opt.train_l = train_l_temp
     print(opt.train_l)

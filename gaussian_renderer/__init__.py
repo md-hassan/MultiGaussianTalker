@@ -98,6 +98,7 @@ def render_from_batch(viewpoint_cameras, pc : GaussianModel, pipe, random_color=
     
     if stage == "coarse":
         aud_features, eye_features, cam_features = None, None, None 
+        # get features for each point in point cloud using (hexplane + MLP). get s, r, a, sh from feats using MLPs
         means3D_final, scales_temp, rotations_temp, opacity_temp, shs_temp = pc._deformation(means3D, scales, rotations, opacity, shs, aud_features, eye_features, cam_features)
         if "scales" in canonical_tri_plane_factor_list: # ['opacity', 'shs'] by default. why not train others??
             scales_temp = scales_temp-2
@@ -128,9 +129,9 @@ def render_from_batch(viewpoint_cameras, pc : GaussianModel, pipe, random_color=
         opacity_final = pc.opacity_activation(opacity_final)
 
     elif stage == "fine":
-        aud_features = torch.cat(aud_features,dim=0)
-        eye_features = torch.cat(eye_features,dim=0)
-        cam_features = torch.cat(cam_features,dim=0)
+        aud_features = torch.cat(aud_features,dim=0) # a_n in the figure, to be used for spatial-audio attention
+        eye_features = torch.cat(eye_features,dim=0) # e_n in the figure
+        cam_features = torch.cat(cam_features,dim=0) # v_n in the figure
         means3D_final, scales_final, rotations_final, opacity_final, shs_final, attention = pc._deformation(means3D, scales, rotations, opacity, shs, aud_features, eye_features,cam_features)
                                                                                                     
         scales_final = pc.scaling_activation(scales_final)
