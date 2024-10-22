@@ -267,21 +267,21 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
     gaussians = GaussianModel(dataset.sh_degree, hyper) # Gaussian Splat Model
     dataset.model_path = args.model_path
     timer = Timer()
-    scene = Scene(dataset, gaussians, load_coarse=None)
+    scene = Scene(dataset, gaussians, load_coarse=None, load_iteration=8000)
     timer.start()
 
     train_l_temp=opt.train_l
     opt.train_l=["xyz","deformation","grid","f_dc","f_rest","opacity","scaling","rotation"]
     print(opt.train_l)
-    # scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
-    #                          checkpoint_iterations, checkpoint, debug_from,
-    #                          gaussians, scene, "coarse", tb_writer, opt.coarse_iterations,timer, use_wandb)
+    scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
+                             checkpoint_iterations, checkpoint, debug_from,
+                             gaussians, scene, "coarse", tb_writer, opt.coarse_iterations,timer, use_wandb)
     
     opt.train_l = train_l_temp
     print(opt.train_l)
-    scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
-                         checkpoint_iterations, checkpoint, debug_from,
-                         gaussians, scene, "fine", tb_writer, opt.iterations,timer, use_wandb)
+    # scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
+    #                      checkpoint_iterations, checkpoint, debug_from,
+    #                      gaussians, scene, "fine", tb_writer, opt.iterations,timer, use_wandb)
 
 def prepare_output_and_logger(expname):    
     if not args.model_path:

@@ -21,6 +21,15 @@ class canonical_tri_plane(nn.Module):
         self.opacity = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 1))
         self.shs = nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 16*3))
 
+    def save_feature_mlps(self, path):
+        torch.save({
+            'features': self.feature_out.state_dict(),
+            'scales': self.scales.state_dict(),
+            'rotations': self.rotations.state_dict(),
+            'opacity': self.opacity.state_dict(),
+            'shs': self.shs.state_dict(),
+        }, path + "/feature_mlps.pth")
+
     def mlp_init_zeros(self):
         
         nn.init.xavier_uniform_(self.scales[-1].weight,gain=0.1)

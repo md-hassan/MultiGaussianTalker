@@ -99,7 +99,10 @@ class Deformation(nn.Module):
         self.tri_plane.mlp_init_zeros()
     def mlp2cpu(self):
         self.tri_plane.mlp2cpu()
-        
+
+    def save_feature_mlps(self, path):
+        self.tri_plane.save_feature_mlps(path)
+
     def eye_encoding(self,value, d_model=32):
         batch_size, _ = value.shape  
         value = value.to('cuda')
@@ -153,7 +156,7 @@ class Deformation(nn.Module):
             enc_x = self.enc_x[:B]
         
         else:
-            # audio_features [B, 8, 29, 16]). enc_x -> point cloud embeddings [B, N, 64] 
+            # audio_features [B, 8, 29, 16]); enc_x -> point cloud embeddings [B, N, 64] 
             enc_x = self.tri_plane(rays_pts_emb,only_feature = True, train_tri_plane = self.args.train_tri_plane)
             
         enc_a_list= []
@@ -412,6 +415,8 @@ class deform_network(nn.Module):
         return self.deformation_net.get_grid_parameters()
     def mlp2cpu(self):
         self.deformation_net.mlp2cpu()
+    def save_feature_mlps(self, path):
+        self.deformation_net.save_feature_mlps(path)
 
 def initialize_weights(m):
     if isinstance(m, nn.Linear):

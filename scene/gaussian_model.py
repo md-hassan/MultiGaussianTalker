@@ -646,3 +646,5 @@ class GaussianModel:
         self._features_dc = self._features_dc.detach()
         self._features_rest = self._features_rest.detach()
         
+    def save_feature_mlps(self, path):
+        self._deformation.save_feature_mlps(path)
