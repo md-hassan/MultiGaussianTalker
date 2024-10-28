@@ -33,6 +33,7 @@ class FourDGSdataset(Dataset):
         if self.dataset_type != "PanopticSports":
 
             caminfo = self.dataset[index]
+            person = caminfo.person
             R = caminfo.R  # (3, 3)
             T = caminfo.T
             FovX = caminfo.FovX
@@ -78,7 +79,8 @@ class FourDGSdataset(Dataset):
             return Camera(colmap_id=index,R=R,T=T,FoVx=FovX,FoVy=FovY,gt_image=full_image, head_mask=head_mask, bg_image = bg_image,
                     image_name=f"{index}",uid=index,data_device=torch.device("cuda"), #trans=trans,
                     aud_f = caminfo.aud_f, eye_f = caminfo.eye_f,
-                    face_rect=face_rect, lhalf_rect=lhalf_rect, eye_rect=eye_rect, lips_rect=lips_rect, bg_w_torso = bg_w_torso)
+                    face_rect=face_rect, lhalf_rect=lhalf_rect, eye_rect=eye_rect, lips_rect=lips_rect, bg_w_torso = bg_w_torso,
+                    person=person)
             
         else:
             return self.dataset[index]

@@ -16,7 +16,7 @@ from random import randint
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import network_gui, render_from_batch
 import sys
-from scene import Scene, GaussianModel
+from scene import Scene, GaussianModel, GaussianPointCloud
 from utils.general_utils import safe_state
 import uuid
 from tqdm import tqdm
@@ -45,16 +45,20 @@ vgg_perceptual_loss = VGGPerceptualLoss().to(device)
     
 def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations, 
                          checkpoint_iterations, checkpoint, debug_from,
-                         gaussians, scene, stage, tb_writer, train_iter,timer, use_wandb=False):
+                         pointclouds, deformation_net, scenes, stage, tb_writer, train_iter,timer, use_wandb=False):
     first_iter = 0
-    gaussians.training_setup(opt)
+    for person in pointclouds.keys():
+        pointclouds[person].training_setup(opt)
+    deformation_net.training_setup(opt)
+
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
-        gaussians.restore(model_params, opt)
-
+        for person in pointclouds.keys():
+            pointclouds[person].restore(model_params, opt)
+        deformation_net.restore(model_params, opt)
 
     if stage == "fine" and first_iter == 0:
-        gaussians.mlp2cpu()
+        deformation_net.mlp2cpu()
         
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
@@ -63,22 +67,29 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
     ema_loss_for_log = 0.0
     ema_psnr_for_log = 0.0
 
-    final_iter = train_iter
+    if stage == 'coarse':
+        final_iter = train_iter
+    elif stage == 'fine':
+        final_iter = train_iter * len(pointclouds.keys())
     
     progress_bar = tqdm(range(first_iter, final_iter), desc="Training progress")
     first_iter += 1
-    test_cams = scene.getTestCameras()
-    train_cams = scene.getTrainCameras()
+    test_cam_scenes = [scene.getTestCameras() for scene in scenes.values()]
+    train_cams_scenes = [scene.getTrainCameras() for scene in scenes.values()]
     
     if not viewpoint_stack and not opt.dataloader:
-        viewpoint_stack = [i for i in train_cams]
+        viewpoint_stack = []
+        for train_cams in train_cams_scenes:
+            viewpoint_stack += [i for i in train_cams]
         temp_list = copy.deepcopy(viewpoint_stack)
     
     batch_size = opt.batch_size
     if stage == 'coarse':batch_size=1
     print("data loading done")
     if opt.dataloader:
-        viewpoint_stack = scene.getTrainCameras()
+        viewpoint_stack = []
+        for scene in scenes.values():
+            viewpoint_stack += scene.getTrainCameras()
         if opt.custom_sampler is not None:
             sampler = FineSampler(viewpoint_stack)
             viewpoint_stack_loader = DataLoader(viewpoint_stack, batch_size=batch_size,sampler=sampler,num_workers=32,collate_fn=list, drop_last = True)
@@ -103,7 +114,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         #         net_image_bytes = None
         #         custom_cam, do_training, pipe.convert_SHs_python, pipe.compute_cov3D_python, keep_alive, scaling_modifer, ts = network_gui.receive()
         #         if custom_cam != None:
-        #             net_image = render(custom_cam, gaussians, pipe, background, scaling_modifer, stage=stage, cam_type=scene.dataset_type)["render"]
+        #             net_image = render(custom_cam, gaussians, pipe, background, scaling_modifer, stage=stage, cam_type=scenes.dataset_type)["render"]
         #             import pdb;pdb.set_trace()
         #             net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
         #         network_gui.send(net_image_bytes, dataset.source_path)
@@ -114,12 +125,14 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
 
         iter_start.record()
 
-        gaussians.update_learning_rate(iteration)
+        for person in pointclouds.keys():
+            pointclouds[person].update_learning_rate(iteration)
+        deformation_net.update_learning_rate(iteration)
 
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
-            gaussians.oneupSHdegree()
-
+            for person in pointclouds.keys():
+                pointclouds[person].oneupSHdegree()
 
         if opt.dataloader and not load_in_memory:
             try:
@@ -150,7 +163,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         
         random_color = False
         
-        output = render_from_batch(viewpoint_cams, gaussians, pipe, random_color, stage=stage, batch_size=batch_size, canonical_tri_plane_factor_list=opt.canonical_tri_plane_factor_list,iteration=iteration)
+        output = render_from_batch(viewpoint_cams, pointclouds, deformation_net, pipe, random_color, stage=stage, batch_size=batch_size, canonical_tri_plane_factor_list=opt.canonical_tri_plane_factor_list,iteration=iteration)
         
         image_tensor=output["rendered_image_tensor"]
         gt_image_tensor=output["gt_tensor"]
@@ -188,7 +201,8 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         with torch.no_grad():
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             ema_psnr_for_log = 0.4 * psnr_ + 0.6 * ema_psnr_for_log
-            total_point = gaussians._xyz.shape[0]
+            # total_point = gaussians._xyz.shape[0]
+            total_point = {k:pointclouds[k]._xyz.shape[0] for k in pointclouds.keys()}
             
             if use_wandb:
                 if iteration % 10 == 0:
@@ -213,15 +227,28 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             timer.pause()
             if iteration % 500 == 0 or iteration == 1:
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
-                scene.save(iteration, stage, torch.cat([gt_image_tensor, image_tensor]), viewpoint_cams[0].uid)
-                
+                if stage == 'coarse':
+                    scenes[person].save(iteration, stage, torch.cat([gt_image_tensor, image_tensor]), viewpoint_cams[0].uid)
+                    deformation_path = os.path.join(args.model_path, "deformation/coarse_iteration_{}".format(iteration))
+                    deformation_net.save_deformation(deformation_path)
+                elif stage == 'fine':
+                    for person in scenes.keys():
+                        scenes[person].save(iteration, stage, torch.cat([gt_image_tensor, image_tensor]), viewpoint_cams[0].uid)
+                    deformation_path = os.path.join(args.model_path, "deformation/iteration_{}".format(iteration))
+                    deformation_net.save_deformation(deformation_path)
+
             timer.start()
             # Densification
-            if iteration < opt.densify_until_iter:
-                if stage == "coarse" or (stage=="fine"and opt.split_gs_in_fine_stage):
+            # opt.densify_from_iter *= len(pointclouds.keys())
+            # opt.densification_interval *= len(pointclouds.keys())
+            # opt.densify_until_iter *= len(pointclouds.keys())
+            # opt.pruning_from_iter *= len(pointclouds.keys())
+            # opt.pruning_interval *= len(pointclouds.keys())
+            if iteration < opt.densify_until_iter :
+                if stage == "coarse":
                     # Keep track of max radii in image-space for pruning
-                    gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                    gaussians.add_densification_stats(viewspace_point_tensor_grad, visibility_filter)
+                    pointclouds[person].max_radii2D[visibility_filter] = torch.max(pointclouds[person].max_radii2D[visibility_filter], radii[visibility_filter])
+                    pointclouds[person].add_densification_stats(viewspace_point_tensor_grad, visibility_filter)
 
                     if stage == "coarse":
                         opacity_threshold = opt.opacity_threshold_coarse
@@ -229,59 +256,82 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                     else:    
                         opacity_threshold = opt.opacity_threshold_fine_init - iteration*(opt.opacity_threshold_fine_init - opt.opacity_threshold_fine_after)/(opt.densify_until_iter)  
                         densify_threshold = opt.densify_grad_threshold_fine_init - iteration*(opt.densify_grad_threshold_fine_init - opt.densify_grad_threshold_after)/(opt.densify_until_iter )  
-                    if  iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0 and gaussians.get_xyz.shape[0]<50000:
+                    if  iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0 and pointclouds[person].get_xyz.shape[0]<50000:
                         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                         
-                        gaussians.densify(densify_threshold, opacity_threshold, scene.cameras_extent, size_threshold, 5, 5, scene.model_path, iteration, stage)
+                        pointclouds[person].densify(densify_threshold, opacity_threshold, scenes[person].cameras_extent, size_threshold, 5, 5, scenes[person].model_path, iteration, stage)
                     if  iteration > opt.pruning_from_iter and iteration % opt.pruning_interval == 0:
                         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                         # print("pruning")
                         # print(f"densify_threshold:{densify_threshold}, opacity_threshold:{opacity_threshold}, size_threshold:{size_threshold}")
-                        gaussians.prune(densify_threshold, opacity_threshold, scene.cameras_extent, size_threshold)
+                        pointclouds[person].prune(densify_threshold, opacity_threshold, scenes[person].cameras_extent, size_threshold)
                         
                     # if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0 :
-                    if iteration % opt.densification_interval == 0 and gaussians.get_xyz.shape[0]<50000 and opt.add_point: 
-                        gaussians.grow(5,5,scene.model_path,iteration,stage)
+                    if iteration % opt.densification_interval == 0 and pointclouds[person].get_xyz.shape[0]<50000 and opt.add_point: 
+                        pointclouds[person].grow(5,5,scenes[person].model_path,iteration,stage)
                         # torch.cuda.empty_cache()
                     # if stage == 'fine' and iteration % opt.opacity_reset_interval == 0:
                     #     print("reset opacity")
                     #     gaussians.reset_opacity() 
-                
 
             # Optimizer step
-            if iteration < opt.iterations:
-                gaussians.optimizer.step()
-                gaussians.optimizer.zero_grad(set_to_none = True)
+            if iteration < opt.iterations * len(pointclouds.keys()):
+                for person in pointclouds.keys():
+                    pointclouds[person].optimizer.step()
+                    pointclouds[person].optimizer.zero_grad(set_to_none = True)
+                deformation_net.optimizer.step()
+                deformation_net.optimizer.zero_grad(set_to_none = True)
 
-            if (iteration in checkpoint_iterations):
-                print("\n[ITER {}] Saving Checkpoint".format(iteration))
-                torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+            # if (iteration in checkpoint_iterations):
+            #     print("\n[ITER {}] Saving Checkpoint".format(iteration))
+            #     torch.save((gaussians.capture(), iteration), scenes.model_path + "/chkpnt" + str(iteration) + ".pth")
+
                 
-                
-def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname, use_wandb):
+def training(base_dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname, use_wandb):
     # first_iter = 0
     tb_writer = prepare_output_and_logger(expname)
     if use_wandb:
         wandb.init(project="TalkingGaussians", name=expname)
-        
-    gaussians = GaussianModel(dataset.sh_degree, hyper) # Gaussian Splat Model
-    dataset.model_path = args.model_path
-    timer = Timer()
-    scene = Scene(dataset, gaussians, load_coarse=None, load_iteration=8000)
-    timer.start()
+    base_dataset.model_path = args.model_path
 
+    pointcloud_dict, datasets_dict, scene_dict = {}, {}, {}
+    persons = base_dataset.persons
+    for person in persons:
+        datasets_dict[person] = copy.deepcopy(base_dataset)
+        datasets_dict[person].source_path = os.path.join(base_dataset.base_path, person)
+        # gaussians_dict[person] = GaussianModel(datasets_dict[person].sh_degree, hyper)
+        # scene_dict[person] = Scene(datasets_dict[person], gaussians_dict[person], person, load_coarse=None, load_iteration=None)
+
+        pointcloud_dict[person] = GaussianPointCloud(datasets_dict[person].sh_degree, hyper)
+        scene_dict[person] = Scene(datasets_dict[person], pointcloud_dict[person], person, load_coarse=None, load_iteration=None)
+        print(f"Created Scene and Gaussians for {person}\n")
+
+    deformation_net = GaussianModel(hyper)
+    deformation_net._deformation = deformation_net._deformation.to('cuda')
+
+    # Need to handle AABB since it is specific to each person, but the model itself is common
+    # Problem: looks like AABB is a learned param that is applied each time to normalize n/w?
+    # deformation_net._deformation.deformation_net.set_aabb(xyz_max,xyz_min)
+
+    timer = Timer()
+    timer.start()
     train_l_temp=opt.train_l
     opt.train_l=["xyz","deformation","grid","f_dc","f_rest","opacity","scaling","rotation"]
     print(opt.train_l)
-    scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
-                             checkpoint_iterations, checkpoint, debug_from,
-                             gaussians, scene, "coarse", tb_writer, opt.coarse_iterations,timer, use_wandb)
-    
+    for person in pointcloud_dict.keys():
+        print(f"Coarse Training for: {person}\n")
+        temp_pointcloud_dict = {person: pointcloud_dict[person]}
+        temp_scene_dict = {person: scene_dict[person]}
+        scene_reconstruction(base_dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
+                                checkpoint_iterations, checkpoint, debug_from,
+                                temp_pointcloud_dict, deformation_net, temp_scene_dict, "coarse", tb_writer, opt.coarse_iterations,timer, use_wandb)
+
+    print("\n\nStarting Fine training")
     opt.train_l = train_l_temp
     print(opt.train_l)
-    # scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
-    #                      checkpoint_iterations, checkpoint, debug_from,
-    #                      gaussians, scene, "fine", tb_writer, opt.iterations,timer, use_wandb)
+    scene_reconstruction(base_dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
+                         checkpoint_iterations, checkpoint, debug_from,
+                         pointcloud_dict, deformation_net, scene_dict, "fine", tb_writer, opt.iterations,timer, use_wandb)
 
 def prepare_output_and_logger(expname):    
     if not args.model_path:
@@ -361,6 +411,9 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
 def evaluate_video(video_dir, GT_video_dir, short_configs='Obama2'):
     os.system(f"python eval/compare_video.py --video_dir {video_dir} --GT_video_dir {GT_video_dir} --store_result --short_configs {short_configs} --face_crop ")
     
+def list_of_strings(arg):
+    return arg.split(',')
+
 def setup_seed(seed):
      torch.manual_seed(seed)
      torch.cuda.manual_seed_all(seed)
@@ -389,8 +442,10 @@ if __name__ == "__main__":
     parser.add_argument("--expname", type=str, default = "")
     parser.add_argument("--use_wandb", action="store_true")
     parser.add_argument("--configs", type=str, default = "")
+    parser.add_argument("--persons", type=list_of_strings, default = [])
     
     args = parser.parse_args(sys.argv[1:])
+    args.persons = [p.strip() for p in args.persons]
     args.save_iterations.append(args.iterations)
     if args.configs:
         import mmcv

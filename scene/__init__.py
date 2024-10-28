@@ -15,7 +15,7 @@ import json
 from utils.system_utils import searchForMaxIteration
 # from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.talking_dataset_readers import sceneLoadTypeCallbacks2
-from scene.gaussian_model import GaussianModel
+from scene.gaussian_model import GaussianModel, GaussianPointCloud
 from scene.dataset import FourDGSdataset
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
@@ -27,7 +27,7 @@ class Scene:
 
     gaussians : GaussianModel
 
-    def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, 
+    def __init__(self, args : ModelParams, gaussians : GaussianModel, person, load_iteration=None, 
                  shuffle=True, resolution_scales=[1.0], load_coarse=False, custom_aud=None):
         """b
         :param path: Path to colmap scene main folder.
@@ -35,6 +35,7 @@ class Scene:
         self.model_path = args.model_path
         self.loaded_iter = None
         self.gaussians = gaussians
+        self.person = person
         
         if load_iteration:
             if load_iteration == -1:
@@ -47,7 +48,7 @@ class Scene:
         self.test_cameras = {}
         self.video_cameras = {}
 
-        scene_info = sceneLoadTypeCallbacks2["ER-NeRF"](args.source_path, False, args.eval, custom_aud=custom_aud)
+        scene_info = sceneLoadTypeCallbacks2["ER-NeRF"](person, args.source_path, False, args.eval, custom_aud=custom_aud)
         dataset_type = "ER-NeRF"
         
         self.maxtime = scene_info.maxtime
@@ -70,7 +71,10 @@ class Scene:
         if args.add_points:
             print("add points.")
             scene_info = scene_info._replace(point_cloud=add_points(scene_info.point_cloud, xyz_max=xyz_max, xyz_min=xyz_min))
-        self.gaussians._deformation.deformation_net.set_aabb(xyz_max,xyz_min)
+
+        # Need to handle load model AND MORE IMPORTANTLY AABB since it is specific to each person
+        # self.gaussians._deformation.deformation_net.set_aabb(xyz_max,xyz_min)
+
         if self.loaded_iter:
             self.gaussians.load_ply(os.path.join(self.model_path,
                                                            "point_cloud",
@@ -86,13 +90,14 @@ class Scene:
 
     def save(self, iteration, stage, image=None, image_idx = None):
         if stage == "coarse":
-            point_cloud_path = os.path.join(self.model_path, "point_cloud/coarse_iteration_{}".format(iteration))
-
+            point_cloud_path = os.path.join(self.model_path, self.person, "point_cloud/coarse_iteration_{}".format(iteration))
+            deformation_path = os.path.join(self.model_path, "deformation/coarse_iteration_{}".format(iteration))
         else:
-            point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
+            point_cloud_path = os.path.join(self.model_path, self.person, "point_cloud/iteration_{}".format(iteration))
+            deformation_path = os.path.join(self.model_path, "deformation/iteration_{}".format(iteration))
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
         self.gaussians.save_deformation(point_cloud_path)
-        self.gaussians.save_feature_mlps(point_cloud_path)
+        # self.gaussians.save_feature_mlps(deformation_path)
         
         if image is not None:
             save_image(image, os.path.join(point_cloud_path, str(image_idx) + ".png"))

@@ -60,6 +60,7 @@ class CameraInfo(NamedTuple):
     eye_f: np.array
     eye_rect: list
     lips_rect: list
+    person: str
    
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
@@ -203,7 +204,7 @@ def euler2rot(euler_angle):
     ), 2)
     return torch.bmm(rot_x, torch.bmm(rot_y, rot_z))
 
-def readCamerasFromTracksTransforms(path, meshfile, transformsfile, aud_features, eye_features, 
+def readCamerasFromTracksTransforms(person, path, meshfile, transformsfile, aud_features, eye_features, 
                                     extension=".jpg", mapper = {}, preload=False, custom_aud =None):
     cam_infos = []
     mesh_path = os.path.join(path, meshfile)
@@ -333,14 +334,15 @@ def readCamerasFromTracksTransforms(path, meshfile, transformsfile, aud_features
                         image_name=image_name, width=contents["w"], height=contents["h"],
                         torso_image=torso_img, torso_image_path=torso_image_path, bg_image=bg_img, bg_image_path=bg_image_path,
                         mask=seg, mask_path=mask_path, trans=trans_infos[frame["img_id"]],
-                        face_rect=face_rect, lhalf_rect=lhalf_rect, aud_f=aud_feature, eye_f=eye_area, eye_rect=eye_rect, lips_rect=lips_rect))
+                        face_rect=face_rect, lhalf_rect=lhalf_rect, aud_f=aud_feature, eye_f=eye_area, eye_rect=eye_rect, lips_rect=lips_rect,
+                        person=person))
     return cam_infos     
 
 
 
 
 
-def readTalkingPortraitDatasetInfo(path, white_background, eval, extension=".jpg",custom_aud=None):
+def readTalkingPortraitDatasetInfo(person, path, white_background, eval, extension=".jpg",custom_aud=None):
     # Audio Information
     aud_features = np.load(os.path.join(path, 'aud_ds.npy'))
     aud_features = torch.from_numpy(aud_features)
@@ -365,9 +367,9 @@ def readTalkingPortraitDatasetInfo(path, white_background, eval, extension=".jpg
     
     timestamp_mapper, max_time = read_timeline(path)
     print("Reading Training Transforms")
-    train_cam_infos = readCamerasFromTracksTransforms(path, "track_params.pt", "transforms_train.json", aud_features, eye_features, extension, timestamp_mapper, preload = False)
+    train_cam_infos = readCamerasFromTracksTransforms(person, path, "track_params.pt", "transforms_train.json", aud_features, eye_features, extension, timestamp_mapper, preload = False)
     print("Reading Test Transforms")
-    test_cam_infos = readCamerasFromTracksTransforms(path, "track_params.pt", "transforms_val.json", aud_features, eye_features, extension, timestamp_mapper)
+    test_cam_infos = readCamerasFromTracksTransforms(person, path, "track_params.pt", "transforms_val.json", aud_features, eye_features, extension, timestamp_mapper)
     print("Generating Video Transforms")
     video_cam_infos = None 
 
@@ -379,7 +381,7 @@ def readTalkingPortraitDatasetInfo(path, white_background, eval, extension=".jpg
         else:
             raise NotImplementedError(f'[ERROR] aud_features.shape {aud_features.shape} not supported')
         print("Reading Custom Transforms")
-        custom_cam_infos = readCamerasFromTracksTransforms(path, "track_params.pt", "transforms_val.json", aud_features, eye_features, extension, 
+        custom_cam_infos = readCamerasFromTracksTransforms(person, path, "track_params.pt", "transforms_val.json", aud_features, eye_features, extension, 
                                                            timestamp_mapper,custom_aud=custom_aud)
     else:
         custom_cam_infos=None

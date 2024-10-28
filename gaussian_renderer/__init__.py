@@ -16,15 +16,38 @@ from scene.gaussian_model import GaussianModel
 from time import time 
     
     
-def render_from_batch(viewpoint_cameras, pc : GaussianModel, pipe, random_color= False, scaling_modifier = 1.0, stage="fine", batch_size=1, visualize_attention=False, only_infer = False, canonical_tri_plane_factor_list = None, iteration=None):
+def render_from_batch(viewpoint_cameras, pcs : GaussianModel, deformation_net, pipe, random_color= False, scaling_modifier = 1.0, stage="fine", batch_size=1, visualize_attention=False, only_infer = False, canonical_tri_plane_factor_list = None, iteration=None):
+
+    # new: for each viewpoint obj in list, construct means3D and other variables using viewpoint obj
+    # get PC from person idx stored inside viewpoint obj
+
     if only_infer:
         time1 = time()
         batch_size = len(viewpoint_cameras)
-    means3D = pc.get_xyz.unsqueeze(0).repeat(batch_size, 1, 1) # [B, N, 3]
-    opacity = pc._opacity.unsqueeze(0).repeat(batch_size, 1, 1) # [B, N, 1]
-    shs = pc.get_features.unsqueeze(0).repeat(batch_size, 1, 1, 1) # [B, N, 16, 3]
-    scales = pc._scaling.unsqueeze(0).repeat(batch_size, 1, 1) # [B, N, 3]
-    rotations = pc._rotation.unsqueeze(0).repeat(batch_size, 1, 1) # [B, N, 4] 
+    # means3D = pc.get_xyz.unsqueeze(0).repeat(batch_size, 1, 1) # [B, N, 3]
+    # opacity = pc._opacity.unsqueeze(0).repeat(batch_size, 1, 1) # [B, N, 1]
+    # shs = pc.get_features.unsqueeze(0).repeat(batch_size, 1, 1, 1) # [B, N, 16, 3]
+    # scales = pc._scaling.unsqueeze(0).repeat(batch_size, 1, 1) # [B, N, 3]
+    # rotations = pc._rotation.unsqueeze(0).repeat(batch_size, 1, 1) # [B, N, 4] 
+
+    means3D = []
+    opacity = []
+    shs = []
+    scales = []
+    rotations = []
+    for cam in viewpoint_cameras:
+        means3D.append(pcs[cam.person].get_xyz.unsqueeze(0))
+        opacity.append(pcs[cam.person]._opacity.unsqueeze(0))
+        shs.append(pcs[cam.person].get_features.unsqueeze(0))
+        scales.append(pcs[cam.person]._scaling.unsqueeze(0))
+        rotations.append(pcs[cam.person]._rotation.unsqueeze(0))
+
+    means3D = torch.cat(means3D, dim=0) # [B, N, 3]
+    opacity = torch.cat(opacity, dim=0) # [B, N, 1]
+    shs = torch.cat(shs, dim=0) # [B, N, 16, 3]
+    scales = torch.cat(scales, dim=0) # [B, N, 3]
+    rotations = torch.cat(rotations, dim=0) # [B, N, 4]        
+
     attention = None
     colors_precomp = None
     cov3D_precomp = None    # why is covariance matrix None ???????????
@@ -42,7 +65,8 @@ def render_from_batch(viewpoint_cameras, pc : GaussianModel, pipe, random_color=
     cam_features = []
     
     for viewpoint_camera in viewpoint_cameras:
-        screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
+        person = viewpoint_camera.person
+        screenspace_points = torch.zeros_like(pcs[person].get_xyz, dtype=pcs[person].get_xyz.dtype, requires_grad=True, device="cuda") + 0
         try:
             screenspace_points.retain_grad()
         except:
@@ -79,7 +103,7 @@ def render_from_batch(viewpoint_cameras, pc : GaussianModel, pipe, random_color=
             scale_modifier=scaling_modifier,
             viewmatrix=viewpoint_camera.world_view_transform.cuda(),
             projmatrix=viewpoint_camera.full_proj_transform.cuda(),
-            sh_degree=pc.active_sh_degree,
+            sh_degree=pcs[person].active_sh_degree,
             campos=viewpoint_camera.camera_center.cuda(),
             prefiltered=False,
             debug=pipe.debug
@@ -99,7 +123,7 @@ def render_from_batch(viewpoint_cameras, pc : GaussianModel, pipe, random_color=
     if stage == "coarse":
         aud_features, eye_features, cam_features = None, None, None 
         # get features for each point in point cloud using (hexplane + MLP). get s, r, a, sh from feats using MLPs
-        means3D_final, scales_temp, rotations_temp, opacity_temp, shs_temp = pc._deformation(means3D, scales, rotations, opacity, shs, aud_features, eye_features, cam_features)
+        means3D_final, scales_temp, rotations_temp, opacity_temp, shs_temp = deformation_net._deformation(means3D, scales, rotations, opacity, shs, aud_features, eye_features, cam_features)
         if "scales" in canonical_tri_plane_factor_list: # ['opacity', 'shs'] by default. why not train others??
             scales_temp = scales_temp-2
             scales_final = scales_temp
@@ -122,21 +146,22 @@ def render_from_batch(viewpoint_cameras, pc : GaussianModel, pipe, random_color=
             shs_final = shs
             shs_temp = None
             
-        pc.replace_gaussian(scales_temp, rotations_temp, opacity_temp, shs_temp)
+        for person in pcs.keys():
+            pcs[person].replace_gaussian(scales_temp, rotations_temp, opacity_temp, shs_temp)
 
-        scales_final = pc.scaling_activation(scales_final)
+        scales_final = deformation_net.scaling_activation(scales_final)
         rotations_final = torch.nn.functional.normalize(rotations_final,dim=2) 
-        opacity_final = pc.opacity_activation(opacity_final)
+        opacity_final = deformation_net.opacity_activation(opacity_final)
 
     elif stage == "fine":
         aud_features = torch.cat(aud_features,dim=0) # a_n in the figure, to be used for spatial-audio attention
         eye_features = torch.cat(eye_features,dim=0) # e_n in the figure
         cam_features = torch.cat(cam_features,dim=0) # v_n in the figure
-        means3D_final, scales_final, rotations_final, opacity_final, shs_final, attention = pc._deformation(means3D, scales, rotations, opacity, shs, aud_features, eye_features,cam_features)
+        means3D_final, scales_final, rotations_final, opacity_final, shs_final, attention = deformation_net._deformation(means3D, scales, rotations, opacity, shs, aud_features, eye_features,cam_features)
                                                                                                     
-        scales_final = pc.scaling_activation(scales_final)
+        scales_final = deformation_net.scaling_activation(scales_final)
         rotations_final = torch.nn.functional.normalize(rotations_final,dim=2) 
-        opacity_final = pc.opacity_activation(opacity_final)
+        opacity_final = deformation_net.opacity_activation(opacity_final)
         
     
     rendered_image_list = []
