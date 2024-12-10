@@ -26,6 +26,24 @@ from scene.deformation import deform_network
 from scene.regulation import compute_plane_smoothness
 
 class GaussianPointCloud:
+    #gpc
+    def setup_functions(self):
+        def build_covariance_from_scaling_rotation(scaling, scaling_modifier, rotation):
+            L = build_scaling_rotation(scaling_modifier * scaling, rotation)
+            actual_covariance = L @ L.transpose(1, 2)
+            symm = strip_symmetric(actual_covariance)
+            return symm
+        
+        self.scaling_activation = torch.exp
+        self.scaling_inverse_activation = torch.log
+
+        self.covariance_activation = build_covariance_from_scaling_rotation
+
+        self.opacity_activation = torch.sigmoid
+        self.inverse_opacity_activation = inverse_sigmoid
+
+        self.rotation_activation = torch.nn.functional.normalize
+
     def __init__(self, sh_degree : int, args):
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree  
@@ -43,7 +61,7 @@ class GaussianPointCloud:
         self.percent_dense = 0
         self.spatial_lr_scale = 0
         self._deformation_table = torch.empty(0)
-        # self.setup_functions()
+        self.setup_functions()
 
     def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float, time_line: int):
         self.spatial_lr_scale = spatial_lr_scale
@@ -185,7 +203,7 @@ class GaussianPointCloud:
             l.append('rot_{}'.format(i))
         return l
 
-    def load_model(self, path):
+    def load_deformation(self, path):
         self._deformation_table = torch.gt(torch.ones((self.get_xyz.shape[0]),device="cuda"),0)
         self._deformation_accum = torch.zeros((self.get_xyz.shape[0],3),device="cuda")
         if os.path.exists(os.path.join(path, "deformation_table.pth")):
@@ -497,7 +515,9 @@ class GaussianPointCloud:
                     if weight.grad.mean() != 0:
                         print(name," :",weight.grad.mean(), weight.grad.min(), weight.grad.max())
         print("-"*50)
-
+    
+    #my_code
+    #Why NN.paramereters intializaed here here?
     def replace_gaussian(self, scales_final, rotations_final, opacity_final, shs_final):
         if scales_final!=None:
             self._scaling = nn.Parameter(scales_final[0].requires_grad_(True))
@@ -539,7 +559,6 @@ class GaussianPointCloud:
         return self.opacity_activation(self._opacity)
 
 class GaussianModel:
-
     def setup_functions(self):
         def build_covariance_from_scaling_rotation(scaling, scaling_modifier, rotation):
             L = build_scaling_rotation(scaling_modifier * scaling, rotation)
@@ -557,11 +576,12 @@ class GaussianModel:
 
         self.rotation_activation = torch.nn.functional.normalize
 
-    def __init__(self, args):
+    def __init__(self, args , persons):
         # self.active_sh_degree = 0
         # self.max_sh_degree = sh_degree  
         # self._xyz = torch.empty(0)
-        self._deformation = deform_network(args) # for audio driven deformation of 3DGS
+  
+        self._deformation = deform_network(args , persons) # for audio driven deformation of 3DGS
         # self._features_dc = torch.empty(0)
         # self._features_rest = torch.empty(0)
         # self._scaling = torch.empty(0)
@@ -641,7 +661,7 @@ class GaussianModel:
         xyz = self._xyz + deform
         return xyz
 
-    def load_model(self, path):
+    def load_deformation(self, path):
         print("loading model from exists{}".format(path))
         weight_dict = torch.load(os.path.join(path,"deformation.pth"),map_location="cuda")
         self._deformation.load_state_dict(weight_dict)

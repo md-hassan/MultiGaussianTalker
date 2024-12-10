@@ -21,9 +21,10 @@ import torchvision
 from utils.general_utils import safe_state
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args, ModelHiddenParams
-from gaussian_renderer import GaussianModel
+from gaussian_renderer import GaussianModel, GaussianPointCloud
 import concurrent.futures
 from torch.utils.data import DataLoader
+import copy
 
 def multithread_write(image_list, path):
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=None)
@@ -45,10 +46,19 @@ def multithread_write(image_list, path):
 to8b = lambda x : (255*np.clip(x.cpu().numpy(),0,1)).astype(np.uint8)
 
 
-def render_set(model_path, name, iteration, scene, gaussians, pipeline,audio_dir, batch_size):
-    render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
-    gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
+def render_set(model_path, name, iteration, persons, person, scene, pointcloud, pipeline, audio_dir, batch_size):
+    render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "blue_girl_voice_renders")
+    gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "blue_girl_voice_gt")
     inf_audio_dir = audio_dir
+
+    deformation_net = GaussianModel(hyperparam.extract(args), persons)
+    deformation_path = os.path.join(model_path, "deformation/fine_iteration_{}".format(iteration))
+    deformation_net.load_deformation(deformation_path)
+    deformation_net._deformation = deformation_net._deformation.to('cuda')
+    deformation_net.eval()
+    # identity_embedding = deformation_net._deformation._modules['deformation_net'].identity[person].weight.data
+    # other_embedding = deformation_net._deformation._modules['deformation_net'].identity['cnn_25'].weight.data
+    # deformation_net._deformation._modules['deformation_net'].identity[person].weight.data = other_embedding
     
     makedirs(render_path, exist_ok=True)
     if name != 'custom':
@@ -69,7 +79,7 @@ def render_set(model_path, name, iteration, scene, gaussians, pipeline,audio_dir
         print(" -------------------------------------------------")
         print("        test set rendering  :   {}  frames  ".format(process_until))
         print(" -------------------------------------------------") 
-    print("point nums:",gaussians._xyz.shape[0])
+    print("point nums:",pointcloud[person]._xyz.shape[0])
     image = []
     gt = []
     audio_attention = []
@@ -85,12 +95,12 @@ def render_set(model_path, name, iteration, scene, gaussians, pipeline,audio_dir
     for idx in tqdm(range(iterations), desc="Rendering progress",total = iterations):
 
         viewpoint_cams = next(loader)
-        try:
-            output = render_from_batch(viewpoint_cams, gaussians, pipeline, 
+        # try:
+        output = render_from_batch(viewpoint_cams, pointcloud, deformation_net, pipeline, 
                                 random_color= False, stage='fine',
                                 batch_size=batch_size, visualize_attention=False, only_infer=True)
-        except:
-            break
+        # except:
+        #     break
         total_time += output["inference_time"]
         image.append(output["rendered_image_tensor"].cpu())
         gt.append(output["gt_tensor"].cpu())
@@ -101,18 +111,16 @@ def render_set(model_path, name, iteration, scene, gaussians, pipeline,audio_dir
     print("total frame:",(image_tensor.shape[0]))
     print("FPS:",(torch.cat(image,dim=0).shape[0])/(total_time))
     
-    
-    #render attention
+    # render attention
     loader = iter(viewpoint_stack_loader)
     for idx in range(iterations):
-
         viewpoint_cams = next(loader)
-        try:
-            output = render_from_batch(viewpoint_cams, gaussians, pipeline, 
+        # try:
+        output = render_from_batch(viewpoint_cams, pointcloud, deformation_net, pipeline, 
                                 random_color= False, stage='fine',
                                 batch_size=batch_size, visualize_attention=True, only_infer=True) 
-        except:
-            break
+        # except:
+        #     break
         total_time += output["inference_time"]
         audio_attention.append(output["audio_attention"].cpu())
         eye_attention.append(output["eye_attention"].cpu())
@@ -128,54 +136,70 @@ def render_set(model_path, name, iteration, scene, gaussians, pipeline,audio_dir
     if name != 'custom':
         write_frames_to_video(tensor_to_image(gt_image_tensor),gts_path+f'/gt', use_imageio = True)
     write_frames_to_video(tensor_to_image(image_tensor),render_path+'/renders', use_imageio = True)
-    write_frames_to_video(tensor_to_image(audio_tensor),render_path+'/audio', use_imageio = False)
-    write_frames_to_video(tensor_to_image(eye_tensor),render_path+'/eye', use_imageio = False)
-    write_frames_to_video(tensor_to_image(null_tensor),render_path+'/null', use_imageio = False)
-    write_frames_to_video(tensor_to_image(cam_tensor),render_path+'/cam', use_imageio = False)
+    # write_frames_to_video(tensor_to_image(audio_tensor),render_path+'/audio', use_imageio = False)
+    # write_frames_to_video(tensor_to_image(eye_tensor),render_path+'/eye', use_imageio = False)
+    # write_frames_to_video(tensor_to_image(null_tensor),render_path+'/null', use_imageio = False)
+    # write_frames_to_video(tensor_to_image(cam_tensor),render_path+'/cam', use_imageio = False)
 
     if name != 'custom':
-        cmd = f'ffmpeg -loglevel quiet -y -i {gts_path}/gt.mp4 -i {inf_audio_dir} -c:v copy -c:a aac {gts_path}/{model_path.split("/")[-2]}_{name}_{iteration}iter_gt.mov'
+        cmd = f'ffmpeg -loglevel quiet -y -i {gts_path}/gt.mp4 -i {inf_audio_dir} -c:v copy -c:a aac {gts_path}/{person}_{name}_{iteration}iter_gt.mov'
         os.system(cmd)
-    cmd = f'ffmpeg -loglevel quiet -y -i {render_path}/renders.mp4 -i {inf_audio_dir} -c:v copy -c:a aac {render_path}/{model_path.split("/")[-2]}_{name}_{iteration}iter_renders.mov'
+    cmd = f'ffmpeg -loglevel quiet -y -i {render_path}/renders.mp4 -i {inf_audio_dir} -c:v copy -c:a aac {render_path}/{person}_{name}_{iteration}iter_renders.mov'
     os.system(cmd)
-    cmd = f'ffmpeg -loglevel quiet -y -i {render_path}/audio.mp4 -i {inf_audio_dir} -c:v copy -c:a aac {render_path}/{model_path.split("/")[-2]}_{name}_{iteration}iter_audio.mov'
-    os.system(cmd)
-    cmd = f'ffmpeg -loglevel quiet -y -i {render_path}/eye.mp4 -i {inf_audio_dir} -c:v copy -c:a aac {render_path}/{model_path.split("/")[-2]}_{name}_{iteration}iter_eye.mov'
-    os.system(cmd)
-    cmd = f'ffmpeg -loglevel quiet -y -i {render_path}/null.mp4 -i {inf_audio_dir} -c:v copy -c:a aac {render_path}/{model_path.split("/")[-2]}_{name}_{iteration}iter_null.mov'
-    os.system(cmd)
-    cmd = f'ffmpeg -loglevel quiet -y -i {render_path}/cam.mp4 -i {inf_audio_dir} -c:v copy -c:a aac {render_path}/{model_path.split("/")[-2]}_{name}_{iteration}iter_cam.mov'
-    os.system(cmd)
+    # cmd = f'ffmpeg -loglevel quiet -y -i {render_path}/audio.mp4 -i {inf_audio_dir} -c:v copy -c:a aac {render_path}/{person}_{name}_{iteration}iter_audio.mov'
+    # os.system(cmd)
+    # cmd = f'ffmpeg -loglevel quiet -y -i {render_path}/eye.mp4 -i {inf_audio_dir} -c:v copy -c:a aac {render_path}/{person}_{name}_{iteration}iter_eye.mov'
+    # os.system(cmd)
+    # cmd = f'ffmpeg -loglevel quiet -y -i {render_path}/null.mp4 -i {inf_audio_dir} -c:v copy -c:a aac {render_path}/{person}_{name}_{iteration}iter_null.mov'
+    # os.system(cmd)
+    # cmd = f'ffmpeg -loglevel quiet -y -i {render_path}/cam.mp4 -i {inf_audio_dir} -c:v copy -c:a aac {render_path}/{person}_{name}_{iteration}iter_cam.mov'
+    # os.system(cmd)
     
     if name != 'custom':
         os.remove(f"{gts_path}/gt.mp4")
     os.remove(f"{render_path}/renders.mp4")
-    os.remove(f"{render_path}/audio.mp4")
-    os.remove(f"{render_path}/eye.mp4")
-    os.remove(f"{render_path}/null.mp4")
-    os.remove(f"{render_path}/cam.mp4")
+    # os.remove(f"{render_path}/audio.mp4")
+    # os.remove(f"{render_path}/eye.mp4")
+    # os.remove(f"{render_path}/null.mp4")
+    # os.remove(f"{render_path}/cam.mp4")
     
-def render_sets(dataset : ModelParams, hyperparam, iteration : int, pipeline : PipelineParams, args):
+    deformation_net._deformation = deformation_net._deformation.cpu()
+    del deformation_net
+    
+def render_sets(base_dataset : ModelParams, persons, hyperparam, iteration : int, pipeline : PipelineParams, args):
     skip_train, skip_test, skip_video, batch_size= args.skip_train, args.skip_test, args.skip_video, args.batch
-    
+    person_choice = ['black_man', 'blue_girl', 'purple_girl', 'pewdiepie']
     with torch.no_grad():
-        data_dir = dataset.source_path
-        gaussians = GaussianModel(dataset.sh_degree, hyperparam)
-        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, custom_aud=args.custom_aud)
+        data_dir = base_dataset.base_path
+        pointcloud_dict, datasets_dict, scene_dict = {}, {}, {}
+        for person in persons:
+            datasets_dict[person] = copy.deepcopy(base_dataset)
+            datasets_dict[person].source_path = os.path.join(base_dataset.base_path, person)
+            pointcloud_dict[person] = GaussianPointCloud(datasets_dict[person].sh_degree, hyperparam) #sets up the covariance matrix
+            scene_dict[person] = Scene(datasets_dict[person], pointcloud_dict[person], person, load_iteration=iteration, shuffle=False, custom_aud=args.custom_aud)
+            print(f"Created Scene and Gaussians for {person}\n")
         
-        gaussians.eval()
+        # deformation_net = GaussianModel(hyperparam, persons)
+        # deformation_path = os.path.join(args.model_path, "deformation/iteration_{}".format(iteration))
+        # deformation_net.load_deformation(deformation_path)
+        # deformation_net._deformation = deformation_net._deformation.to('cuda')
+        # deformation_net.eval()
         
-        if args.custom_aud != '':
-            audio_dir = os.path.join(data_dir, args.custom_wav)
-            render_set(dataset.model_path, "custom", scene.loaded_iter, scene.getCustomCameras(), gaussians, pipeline, audio_dir, batch_size)
-        
-        if not skip_train:
-            audio_dir = os.path.join(data_dir, "aud_train.wav")
-            render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, pipeline, audio_dir, batch_size)
+        for person in persons:
+            if person in person_choice:
+                temp_pointcloud_dict = {person: pointcloud_dict[person]}
+                temp_scene_dict = {person: scene_dict[person]}            
+                if args.custom_aud != '':
+                    audio_dir = os.path.join(data_dir, person, args.custom_wav)
+                    render_set(base_dataset.model_path, "custom", temp_scene_dict[person].loaded_iter, persons, person, temp_scene_dict[person].getCustomCameras(), temp_pointcloud_dict, pipeline, audio_dir, batch_size)
+                
+                if not skip_train:
+                    audio_dir = os.path.join(data_dir, person, "aud_train.wav")
+                    render_set(base_dataset.model_path, "train", temp_scene_dict[person].loaded_iter, persons, person, temp_scene_dict[person].getTrainCameras(), temp_pointcloud_dict, pipeline, audio_dir, batch_size)
 
-        if not skip_test:
-            audio_dir = os.path.join(data_dir, "aud_novel.wav")
-            render_set(dataset.model_path, "test",iteration, scene.getTestCameras(), gaussians, pipeline, audio_dir, batch_size)
+                if not skip_test:
+                    audio_dir = os.path.join(data_dir, person, "aud_novel.wav")
+                    render_set(base_dataset.model_path, "test", iteration, persons, person, temp_scene_dict[person].getTestCameras(), temp_pointcloud_dict, pipeline, audio_dir, batch_size)
 
 def write_frames_to_video(frames, path, codec='mp4v', fps=25, use_imageio=False):
     if use_imageio:
@@ -204,6 +228,8 @@ def tensor_to_image(tensor, normalize=True):
         image = image.transpose(0, 2, 3, 1)
     return image        
 
+def list_of_strings(arg):
+    return arg.split(',')
             
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -220,6 +246,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch", type=int, required=True)
     parser.add_argument("--custom_aud", type=str, default='')
     parser.add_argument("--custom_wav", type=str, default='')
+    parser.add_argument("--persons", type=list_of_strings, default = [])
     # parser.add_argument("--audio_dir", type=str)
     args = get_combined_args(parser)
     print("Rendering " , args.model_path)
@@ -230,6 +257,7 @@ if __name__ == "__main__":
         args = merge_hparams(args, config)
     # Initialize system state (RNG)
     safe_state(args.quiet)
+    args.persons = [p.strip() for p in args.persons]
     args.only_infer = True
     print(args)
-    render_sets(model.extract(args), hyperparam.extract(args), args.iteration, pipeline.extract(args), args)
+    render_sets(model.extract(args), args.persons, hyperparam.extract(args), args.iteration, pipeline.extract(args), args)

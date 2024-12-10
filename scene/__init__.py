@@ -21,6 +21,7 @@ from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 from torch.utils.data import Dataset
 from scene.dataset_readers import add_points
+import numpy as np
 
 from torchvision.utils import save_image
 class Scene:
@@ -28,7 +29,7 @@ class Scene:
     gaussians : GaussianModel
 
     def __init__(self, args : ModelParams, gaussians : GaussianModel, person, load_iteration=None, 
-                 shuffle=True, resolution_scales=[1.0], load_coarse=False, custom_aud=None):
+                 shuffle=True, resolution_scales=[1.0], load_coarse=False, custom_aud=None, n_padding=0):
         """b
         :param path: Path to colmap scene main folder.
         """
@@ -37,6 +38,8 @@ class Scene:
         self.gaussians = gaussians
         self.person = person
         
+
+        #not done
         if load_iteration:
             if load_iteration == -1:
                 self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"))
@@ -50,11 +53,16 @@ class Scene:
 
         scene_info = sceneLoadTypeCallbacks2["ER-NeRF"](person, args.source_path, False, args.eval, custom_aud=custom_aud)
         dataset_type = "ER-NeRF"
-        
+
+        # randomly pad frames based on n_padding (used multi-person)
+        rand_idxs = np.random.choice(np.arange(len(scene_info.train_cameras)), n_padding)
+        for idx in rand_idxs:
+            scene_info.train_cameras.extend([scene_info.train_cameras[idx]])
+
         self.maxtime = scene_info.maxtime
         self.dataset_type = dataset_type
         self.cameras_extent = scene_info.nerf_normalization["radius"]
-
+        #my_code
         print("Loading Training Cameras")
         self.train_camera = FourDGSdataset(scene_info.train_cameras, args, dataset_type)
         print("Loading Test Cameras")
@@ -76,27 +84,27 @@ class Scene:
         # self.gaussians._deformation.deformation_net.set_aabb(xyz_max,xyz_min)
 
         if self.loaded_iter:
-            self.gaussians.load_ply(os.path.join(self.model_path,
+            self.gaussians.load_ply(os.path.join(self.model_path, self.person,
                                                            "point_cloud",
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"))
-            self.gaussians.load_model(os.path.join(self.model_path,
+            self.gaussians.load_deformation(os.path.join(self.model_path,
                                                     "point_cloud",
                                                     "iteration_" + str(self.loaded_iter),
                                                    ))
         else:
             # create gaussian params (mean, rot, scale, sh, alpha) from point cloud features (triplane)
+            # # self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent, self.maxtime)
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent, self.maxtime)
+
 
     def save(self, iteration, stage, image=None, image_idx = None):
         if stage == "coarse":
             point_cloud_path = os.path.join(self.model_path, self.person, "point_cloud/coarse_iteration_{}".format(iteration))
-            deformation_path = os.path.join(self.model_path, "deformation/coarse_iteration_{}".format(iteration))
         else:
             point_cloud_path = os.path.join(self.model_path, self.person, "point_cloud/iteration_{}".format(iteration))
-            deformation_path = os.path.join(self.model_path, "deformation/iteration_{}".format(iteration))
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
-        self.gaussians.save_deformation(point_cloud_path)
+        self.gaussians.save_deformation(point_cloud_path)   # saves person specific deformation table, accum
         # self.gaussians.save_feature_mlps(deformation_path)
         
         if image is not None:

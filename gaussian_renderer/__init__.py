@@ -12,15 +12,15 @@ import numpy as np
 import torch
 import math
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
-from scene.gaussian_model import GaussianModel
+from scene.gaussian_model import GaussianModel, GaussianPointCloud
 from time import time 
     
     
-def render_from_batch(viewpoint_cameras, pcs : GaussianModel, deformation_net, pipe, random_color= False, scaling_modifier = 1.0, stage="fine", batch_size=1, visualize_attention=False, only_infer = False, canonical_tri_plane_factor_list = None, iteration=None):
+def  render_from_batch(viewpoint_cameras, pcs : GaussianModel, deformation_net, pipe, random_color= False, scaling_modifier = 1.0, stage="fine", batch_size=1, visualize_attention=False, only_infer = False, canonical_tri_plane_factor_list = None, iteration=None):
 
     # new: for each viewpoint obj in list, construct means3D and other variables using viewpoint obj
     # get PC from person idx stored inside viewpoint obj
-
+    
     if only_infer:
         time1 = time()
         batch_size = len(viewpoint_cameras)
@@ -35,7 +35,10 @@ def render_from_batch(viewpoint_cameras, pcs : GaussianModel, deformation_net, p
     shs = []
     scales = []
     rotations = []
-    for cam in viewpoint_cameras:
+    
+    for cam in viewpoint_cameras: #this is person specific
+        # print("type cam: ", type(cam))
+        # print("cam: ", cam)
         means3D.append(pcs[cam.person].get_xyz.unsqueeze(0))
         opacity.append(pcs[cam.person]._opacity.unsqueeze(0))
         shs.append(pcs[cam.person].get_features.unsqueeze(0))
@@ -66,6 +69,8 @@ def render_from_batch(viewpoint_cameras, pcs : GaussianModel, deformation_net, p
     
     for viewpoint_camera in viewpoint_cameras:
         person = viewpoint_camera.person
+        current_person = person
+        # print("CURRENT PERSON BEFORE CALLING: ", current_person)
         screenspace_points = torch.zeros_like(pcs[person].get_xyz, dtype=pcs[person].get_xyz.dtype, requires_grad=True, device="cuda") + 0
         try:
             screenspace_points.retain_grad()
@@ -119,11 +124,12 @@ def render_from_batch(viewpoint_cameras, pcs : GaussianModel, deformation_net, p
         lips_list.append(viewpoint_camera.lips_rect)
         bg_mask = bg_mask.to(torch.float).unsqueeze(0).unsqueeze(0)
         gt_masks.append(bg_mask)
-    
+
     if stage == "coarse":
         aud_features, eye_features, cam_features = None, None, None 
         # get features for each point in point cloud using (hexplane + MLP). get s, r, a, sh from feats using MLPs
-        means3D_final, scales_temp, rotations_temp, opacity_temp, shs_temp = deformation_net._deformation(means3D, scales, rotations, opacity, shs, aud_features, eye_features, cam_features)
+        # print("coarse called")
+        means3D_final, scales_temp, rotations_temp, opacity_temp, shs_temp = deformation_net._deformation(current_person, means3D, scales, rotations, opacity, shs, aud_features, eye_features, cam_features)
         if "scales" in canonical_tri_plane_factor_list: # ['opacity', 'shs'] by default. why not train others??
             scales_temp = scales_temp-2
             scales_final = scales_temp
@@ -156,8 +162,12 @@ def render_from_batch(viewpoint_cameras, pcs : GaussianModel, deformation_net, p
     elif stage == "fine":
         aud_features = torch.cat(aud_features,dim=0) # a_n in the figure, to be used for spatial-audio attention
         eye_features = torch.cat(eye_features,dim=0) # e_n in the figure
-        cam_features = torch.cat(cam_features,dim=0) # v_n in the figure
-        means3D_final, scales_final, rotations_final, opacity_final, shs_final, attention = deformation_net._deformation(means3D, scales, rotations, opacity, shs, aud_features, eye_features,cam_features)
+        cam_features = torch.cat(cam_features,dim=0) # v_n in the figure torch.Size([8, 8, 29, 16]) torch.Size([8, 1]) torch.Size([8, 12])  aud eye camera
+
+        
+        # print("fine called")
+        # print("Current person after fine called: ", current_person)
+        means3D_final, scales_final, rotations_final, opacity_final, shs_final, attention = deformation_net._deformation(current_person, means3D, scales, rotations, opacity, shs, aud_features, eye_features,cam_features )
                                                                                                     
         scales_final = deformation_net.scaling_activation(scales_final)
         rotations_final = torch.nn.functional.normalize(rotations_final,dim=2) 

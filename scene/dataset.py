@@ -33,6 +33,7 @@ class FourDGSdataset(Dataset):
         if self.dataset_type != "PanopticSports":
 
             caminfo = self.dataset[index]
+      
             person = caminfo.person
             R = caminfo.R  # (3, 3)
             T = caminfo.T

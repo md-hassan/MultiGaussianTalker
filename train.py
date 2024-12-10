@@ -9,7 +9,7 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 import numpy as np
-import random
+import random, json
 import os, sys
 import torch
 from random import randint
@@ -29,6 +29,7 @@ from utils.loader_utils import FineSampler, get_stamp_list
 import lpips
 import copy
 import wandb
+from torch.utils.data import DataLoader, ConcatDataset, Subset
 
 to8b = lambda x : (255*np.clip(x.cpu().numpy(),0,1)).astype(np.uint8)
 
@@ -43,9 +44,21 @@ from utils.loss_utils import VGGPerceptualLoss
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 vgg_perceptual_loss = VGGPerceptualLoss().to(device)
     
-def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations, 
+def pad_arr_with_random(arr, n):
+    rand_idx = np.random.choice(np.arange(len(arr)), n)
+    # import pdb; pdb.set_trace()
+    arr += [arr[idx] for idx in rand_idx]
+    return arr
+
+def scene_reconstruction( dataset, opt, hyper, pipe, testing_iterations, saving_iterations, 
                          checkpoint_iterations, checkpoint, debug_from,
                          pointclouds, deformation_net, scenes, stage, tb_writer, train_iter,timer, use_wandb=False):
+    
+    
+    pytorch_total_params = sum(p.numel() for p in deformation_net.parameters())
+    print("total parameters: ", pytorch_total_params)
+    1/0
+
     first_iter = 0
     for person in pointclouds.keys():
         pointclouds[person].training_setup(opt)
@@ -70,35 +83,28 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
     if stage == 'coarse':
         final_iter = train_iter
     elif stage == 'fine':
-        final_iter = train_iter * len(pointclouds.keys())
+        final_iter = min(train_iter * len(pointclouds.keys()), 25000)
     
     progress_bar = tqdm(range(first_iter, final_iter), desc="Training progress")
-    first_iter += 1
-    test_cam_scenes = [scene.getTestCameras() for scene in scenes.values()]
-    train_cams_scenes = [scene.getTrainCameras() for scene in scenes.values()]
-    
-    if not viewpoint_stack and not opt.dataloader:
-        viewpoint_stack = []
-        for train_cams in train_cams_scenes:
-            viewpoint_stack += [i for i in train_cams]
-        temp_list = copy.deepcopy(viewpoint_stack)
-    
+    first_iter += 1    
     batch_size = opt.batch_size
+
     if stage == 'coarse':batch_size=1
-    print("data loading done")
     if opt.dataloader:
-        viewpoint_stack = []
-        for scene in scenes.values():
-            viewpoint_stack += scene.getTrainCameras()
-        if opt.custom_sampler is not None:
-            sampler = FineSampler(viewpoint_stack)
-            viewpoint_stack_loader = DataLoader(viewpoint_stack, batch_size=batch_size,sampler=sampler,num_workers=32,collate_fn=list, drop_last = True)
-            random_loader = False
-        else:
-            viewpoint_stack_loader = DataLoader(viewpoint_stack, batch_size=batch_size,shuffle=True,num_workers=32,collate_fn=list, drop_last = True)
-            random_loader = True
-        loader = iter(viewpoint_stack_loader)
-    
+        if stage == 'coarse': # this doesn't need to be person specific 
+            print("going inside coarse")
+            viewpoint_stack = scenes[person].getTrainCameras()
+            viewpoint_stack_loader = DataLoader(viewpoint_stack, batch_size=batch_size,shuffle=True,num_workers=0,collate_fn=list, drop_last = True)
+            loader = iter(viewpoint_stack_loader)
+
+        elif stage == 'fine':
+            # create separate dataloaders for each person
+            dataloader_dict, iter_dict = {}, {}            
+            for person in scenes.keys(): 
+                print(f"Creating dataloader for {person} ...")
+                dataloader_dict[person] = DataLoader(scenes[person].getTrainCameras(), batch_size=batch_size,shuffle=True,num_workers=0,collate_fn=list, drop_last = True)
+                iter_dict[person] = iter(dataloader_dict[person])
+                    
     if stage == "coarse" and opt.zerostamp_init:
         load_in_memory = True
         temp_list = get_stamp_list(viewpoint_stack,0)
@@ -106,23 +112,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
     else:
         load_in_memory = False 
         
-    for iteration in range(first_iter, final_iter+1):   # 여기부터 iteration 시작   
-        # if network_gui.conn == None:
-        #     network_gui.try_connect()
-        # while network_gui.conn != None:
-        #     try:
-        #         net_image_bytes = None
-        #         custom_cam, do_training, pipe.convert_SHs_python, pipe.compute_cov3D_python, keep_alive, scaling_modifer, ts = network_gui.receive()
-        #         if custom_cam != None:
-        #             net_image = render(custom_cam, gaussians, pipe, background, scaling_modifer, stage=stage, cam_type=scenes.dataset_type)["render"]
-        #             import pdb;pdb.set_trace()
-        #             net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
-        #         network_gui.send(net_image_bytes, dataset.source_path)
-        #         if do_training and ((iteration < int(opt.iterations)) or not keep_alive):
-        #             break
-        #     except Exception as e:
-        #         network_gui.conn = None
-
+    for iteration in range(first_iter, final_iter+1):   # 여기부터 iteration 시작   training starts here
         iter_start.record()
 
         for person in pointclouds.keys():
@@ -136,20 +126,27 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
 
         if opt.dataloader and not load_in_memory:
             try:
-                viewpoint_cams = next(loader)
+                if stage == 'coarse':
+                    viewpoint_cams = next(loader)
+                elif stage == 'fine':
+                    # call random person's batch
+                    rand_person = np.random.choice(list(scenes.keys()))
+                    viewpoint_cams = next(iter_dict[rand_person])
             except StopIteration:
                 print("reset dataloader into random dataloader.")
-                if not random_loader:
-                    viewpoint_stack_loader = DataLoader(viewpoint_stack, batch_size=opt.batch_size,shuffle=True,num_workers=32,collate_fn=list)
-                    random_loader = True
-                loader = iter(viewpoint_stack_loader)
+                if stage == 'coarse':
+                    viewpoint_stack_loader = DataLoader(viewpoint_stack, batch_size=batch_size,shuffle=True,num_workers=0,collate_fn=list)
+                    loader = iter(viewpoint_stack_loader)
+                elif stage == 'fine':
+                    for person in scenes.keys():
+                        dataloader_dict[person] = DataLoader(scenes[person].getTrainCameras(), batch_size=batch_size,shuffle=True,num_workers=0,collate_fn=list, drop_last = True)
+                        iter_dict[person] = iter(dataloader_dict[person])
 
         else:
             idx = 0
             viewpoint_cams = []
 
             while idx < batch_size :    
-                    
                 viewpoint_cam = viewpoint_stack.pop(randint(0,len(viewpoint_stack)-1))
                 if not viewpoint_stack :
                     viewpoint_stack =  temp_list.copy()
@@ -162,7 +159,6 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             pipe.debug = True
         
         random_color = False
-        
         output = render_from_batch(viewpoint_cams, pointclouds, deformation_net, pipe, random_color, stage=stage, batch_size=batch_size, canonical_tri_plane_factor_list=opt.canonical_tri_plane_factor_list,iteration=iteration)
         
         image_tensor=output["rendered_image_tensor"]
@@ -224,6 +220,8 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                 progress_bar.close()
 
             # Log and save
+
+            #checpoint and saving gaussian
             timer.pause()
             if iteration % 500 == 0 or iteration == 1:
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
@@ -234,7 +232,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                 elif stage == 'fine':
                     for person in scenes.keys():
                         scenes[person].save(iteration, stage, torch.cat([gt_image_tensor, image_tensor]), viewpoint_cams[0].uid)
-                    deformation_path = os.path.join(args.model_path, "deformation/iteration_{}".format(iteration))
+                    deformation_path = os.path.join(args.model_path, "deformation/fine_iteration_{}".format(iteration))
                     deformation_net.save_deformation(deformation_path)
 
             timer.start()
@@ -287,26 +285,40 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             #     torch.save((gaussians.capture(), iteration), scenes.model_path + "/chkpnt" + str(iteration) + ".pth")
 
                 
-def training(base_dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname, use_wandb):
+def training(base_dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname, use_wandb , persons):
     # first_iter = 0
     tb_writer = prepare_output_and_logger(expname)
     if use_wandb:
         wandb.init(project="TalkingGaussians", name=expname)
     base_dataset.model_path = args.model_path
-
+    # print( base_dataset.model_path , " base_dataset.model_path") #data/vids_25/ckpt
+  
     pointcloud_dict, datasets_dict, scene_dict = {}, {}, {}
     persons = base_dataset.persons
+
+    # find maxframes for padding
+    maxframes, maxperson = 0, None
     for person in persons:
+        with open(os.path.join(base_dataset.base_path, person) + '/transforms_train.json', 'r') as f:
+            n_frames = len(json.load(f)['frames'])
+        maxframes = max(maxframes, n_frames)
+    
+    for person in persons:
+        with open(os.path.join(base_dataset.base_path, person) + '/transforms_train.json', 'r') as f:
+            n_frames = len(json.load(f)['frames'])
+        n_padding = maxframes - n_frames
+        # import pdb; pdb.set_trace()
+
         datasets_dict[person] = copy.deepcopy(base_dataset)
         datasets_dict[person].source_path = os.path.join(base_dataset.base_path, person)
-        # gaussians_dict[person] = GaussianModel(datasets_dict[person].sh_degree, hyper)
-        # scene_dict[person] = Scene(datasets_dict[person], gaussians_dict[person], person, load_coarse=None, load_iteration=None)
-
-        pointcloud_dict[person] = GaussianPointCloud(datasets_dict[person].sh_degree, hyper)
-        scene_dict[person] = Scene(datasets_dict[person], pointcloud_dict[person], person, load_coarse=None, load_iteration=None)
+    
+        pointcloud_dict[person] = GaussianPointCloud(datasets_dict[person].sh_degree, hyper) #sets up the covariance matrix
+        scene_dict[person] = Scene(datasets_dict[person], pointcloud_dict[person], person, load_coarse=None, load_iteration=None, n_padding=n_padding)
+        
         print(f"Created Scene and Gaussians for {person}\n")
 
-    deformation_net = GaussianModel(hyper)
+
+    deformation_net = GaussianModel(hyper , persons)
     deformation_net._deformation = deformation_net._deformation.to('cuda')
 
     # Need to handle AABB since it is specific to each person, but the model itself is common
@@ -317,11 +329,15 @@ def training(base_dataset, hyper, opt, pipe, testing_iterations, saving_iteratio
     timer.start()
     train_l_temp=opt.train_l
     opt.train_l=["xyz","deformation","grid","f_dc","f_rest","opacity","scaling","rotation"]
-    print(opt.train_l)
+    print("opt train done" , "sd")
+    
+
+    # training coarse
     for person in pointcloud_dict.keys():
         print(f"Coarse Training for: {person}\n")
         temp_pointcloud_dict = {person: pointcloud_dict[person]}
         temp_scene_dict = {person: scene_dict[person]}
+ 
         scene_reconstruction(base_dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
                                 checkpoint_iterations, checkpoint, debug_from,
                                 temp_pointcloud_dict, deformation_net, temp_scene_dict, "coarse", tb_writer, opt.coarse_iterations,timer, use_wandb)
@@ -329,6 +345,7 @@ def training(base_dataset, hyper, opt, pipe, testing_iterations, saving_iteratio
     print("\n\nStarting Fine training")
     opt.train_l = train_l_temp
     print(opt.train_l)
+
     scene_reconstruction(base_dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
                          checkpoint_iterations, checkpoint, debug_from,
                          pointcloud_dict, deformation_net, scene_dict, "fine", tb_writer, opt.iterations,timer, use_wandb)
@@ -420,6 +437,7 @@ def setup_seed(seed):
      np.random.seed(seed)
      random.seed(seed)
      torch.backends.cudnn.deterministic = True
+
 if __name__ == "__main__":
     # Set up command line argument parser
     # torch.set_default_tensor_type('torch.FloatTensor')
@@ -458,9 +476,9 @@ if __name__ == "__main__":
     safe_state(args.quiet)
 
     # Start GUI server, configure and run training
-    network_gui.init(args.ip, args.port)
+    # network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), hp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.expname, args.use_wandb)
+    training(lp.extract(args), hp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.expname, args.use_wandb , args.persons)
 
     # All done
     print("\nTraining complete.")

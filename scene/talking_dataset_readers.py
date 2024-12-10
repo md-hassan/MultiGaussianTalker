@@ -344,6 +344,8 @@ def readCamerasFromTracksTransforms(person, path, meshfile, transformsfile, aud_
 
 def readTalkingPortraitDatasetInfo(person, path, white_background, eval, extension=".jpg",custom_aud=None):
     # Audio Information
+
+    #get this for one file rather than all
     aud_features = np.load(os.path.join(path, 'aud_ds.npy'))
     aud_features = torch.from_numpy(aud_features)
 
@@ -359,8 +361,10 @@ def readTalkingPortraitDatasetInfo(person, path, white_background, eval, extensi
     # load action units
     import pandas as pd
     au_blink_info=pd.read_csv(os.path.join(path, 'au.csv'))
-    eye_features = au_blink_info['AU45_r'].values
-    
+    if 'AU45_r' in au_blink_info.columns:
+        eye_features = au_blink_info['AU45_r'].values
+    else:
+        eye_features = au_blink_info[' AU45_r'].values
     
     ply_path = os.path.join(path, "fused.ply")
     mesh_path = os.path.join(path, "track_params.pt")

@@ -1,4 +1,5 @@
 *.pyc
+*.ipynb_checkpoints
 .vscode
 output
 build
@@ -9,6 +10,7 @@ screenshots
 data/
 data
 wandb/
+pytorch3d/
 
 *.jpg
 *.mp4
